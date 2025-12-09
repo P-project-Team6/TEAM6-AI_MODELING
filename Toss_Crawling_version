@@ -1,0 +1,180 @@
+import time
+import re
+import pandas as pd
+from tqdm import tqdm
+import FinanceDataReader as fdr
+
+# Selenium 관련
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+from bs4 import BeautifulSoup
+
+# ==========================================
+# 1. 설정
+# ==========================================
+TOP_N = 80
+DEFAULT_PAGES = 1
+HIGH_PAGES = 1
+
+CHROMEDRIVER_PATH = None
+
+# ==========================================
+# 2. 종목 리스트 확보
+# ==========================================
+def get_kr_top_stocks():
+    print(f">> 국내 시가총액 상위 {TOP_N}개 리스트 확보 중...")
+    try:
+        df_krx = fdr.StockListing('KRX')
+        df_krx = df_krx.sort_values(by='Marcap', ascending=False).head(TOP_N)
+        kr_stocks = df_krx[['Code', 'Name']].to_dict('records')
+        print(f"   - 확보 완료: {len(kr_stocks)}개 종목")
+        return kr_stocks
+    except Exception as e:
+        print(f"!! 리스트 확보 실패: {e}")
+        return [{'Code': '005930', 'Name': '삼성전자'}]
+
+# ==========================================
+# 3. Selenium 유틸
+# ==========================================
+def make_driver(headless=True):
+    options = Options()
+    if headless:
+        options.add_argument("--headless=new")
+        options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--lang=ko-KR")
+    options.add_argument("--window-size=1200,1000")
+    options.add_argument("user-agent=Mozilla/5.0")
+    if CHROMEDRIVER_PATH:
+        driver = webdriver.Chrome(CHROMEDRIVER_PATH, options=options)
+    else:
+        driver = webdriver.Chrome(options=options)
+    return driver
+
+def wait_for_render(driver, timeout=8):
+    try:
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+    except:
+        pass
+    time.sleep(1.0)
+
+# ================================================
+# 4. 토스 본문 추출 전용 함수 (중요)
+# ================================================
+def extract_toss_content(html):
+    """
+    토스증권 게시글 페이지에서 본문만 추출하는 정제 로직.
+    전체 텍스트에서 '팔로우' 이후 ~ 댓글 시작 이전까지를 본문으로 판단.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text("\n")
+
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+
+    # 1) 본문 시작 지점: '팔로우' 바로 아래
+    start = None
+    for i, line in enumerate(lines):
+        if line == "팔로우":
+            start = i + 1
+            break
+
+    if start is None:
+        return ""
+
+    # 2) 댓글 시작 패턴
+    def is_comment(line):
+        if re.match(r".*시간 전$", line):
+            return True
+        if line == "주주":
+            return True
+        if line.startswith("@"):
+            return True
+        return False
+
+    # 3) 본문 수집
+    content_lines = []
+    for j in range(start, len(lines)):
+        if is_comment(lines[j]):
+            break
+        content_lines.append(lines[j])
+
+    return "\n".join(content_lines)
+
+# ==========================================
+# 5. 토스 커뮤니티 크롤링
+# ==========================================
+def crawl_toss_community(stock_list, headless=True, max_posts_per_stock=30):
+    driver = make_driver(headless=headless)
+    results = []
+
+    try:
+        for stock in tqdm(stock_list, desc="TossCommunity"):
+            code = stock["Code"]
+            name = stock["Name"]
+
+            toss_code = f"A{code}"
+            list_url = f"https://www.tossinvest.com/stocks/{toss_code}/community"
+
+            try:
+                driver.get(list_url)
+                wait_for_render(driver)
+            except Exception as e:
+                print(f"[WARN] 목록 페이지 불러오기 실패: {list_url} | {e}")
+                continue
+
+            # 게시글 URL 추출
+            anchors = driver.find_elements(By.CSS_SELECTOR, "a[href*='/community/posts/']")
+            hrefs = []
+            for a in anchors:
+                try:
+                    href = a.get_attribute("href")
+                    if href and "/community/posts/" in href:
+                        hrefs.append(href.split("?")[0])
+                except:
+                    continue
+
+            hrefs = list(dict.fromkeys(hrefs))
+            hrefs = hrefs[:max_posts_per_stock]
+
+            # 게시글 본문 크롤링
+            for post_url in hrefs:
+                try:
+                    driver.get(post_url)
+                    wait_for_render(driver)
+                except:
+                    continue
+
+                try:
+                    html = driver.page_source
+                    content = extract_toss_content(html)
+                except Exception as e:
+                    content = ""
+                    print(f"[WARN] 본문 추출 실패: {post_url} | {e}")
+
+                results.append({
+                    "StockCode": code,
+                    "StockName": name,
+                    "PostURL": post_url,
+                    "Content": content
+                })
+
+    finally:
+        driver.quit()
+
+    return pd.DataFrame(results)
+
+# ==========================================
+# 6. 실행 예시
+# ==========================================
+if __name__ == "__main__":
+    stocks = [{'Code': '005930', 'Name': '삼성전자'}]  # 테스트용
+    df = crawl_toss_community(stocks, headless=False, max_posts_per_stock=5)
+    df.to_csv("toss_crawled.csv", index=False, encoding="utf-8-sig")
+    print("완료")
