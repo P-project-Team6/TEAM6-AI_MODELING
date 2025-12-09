@@ -1,0 +1,65 @@
+import pandas as pd
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
+import torch
+
+# ================================
+# 1. GitHub CSV 경로 설정
+# ================================
+
+COMMUNITY_CSV = "https://github.com/P-project-Team6/TEAM6-AI_MODELING/raw/refs/heads/main/stock_community_data_top80.csv"
+
+TEXT_COLUMN = "Title"   # 제목으로 라벨링하기 위함
+OUTPUT_CSV = "./stock_community_labeled.csv"
+
+
+# ================================
+# 2. 감성 분석 모델 로드 
+# ================================
+MODEL_NAME = "snunlp/KR-FinBert-SC" #한국어 금융 특화 모델 사용
+
+print("모델 로드 중")
+device = 0 if torch.cuda.is_available() else -1
+
+classifier = pipeline(
+    "sentiment-analysis",
+    model=MODEL_NAME,
+    tokenizer=MODEL_NAME,
+    device=device
+)
+
+# ================================
+# 3. CSV 로드
+# ================================
+print("CSV 로드 중")
+df = pd.read_csv(COMMUNITY_CSV)
+
+if TEXT_COLUMN not in df.columns:
+    raise ValueError(f"CSV에 '{TEXT_COLUMN}' 컬럼이 없습니다. 실제 컬럼명을 다시 확인하세요.")
+
+texts = df[TEXT_COLUMN].astype(str).tolist()
+
+# ================================
+# 4. 감성 분석 수행
+# ================================
+print("감성 분석 실행 중")
+
+labels = []
+scores = []
+
+for t in texts:
+    try:
+        out = classifier(t)[0]        
+        labels.append(out["label"])
+        scores.append(float(out["score"]))
+    except:
+        labels.append("unknown")
+        scores.append(0.0)
+
+df["sentiment_label"] = labels
+df["sentiment_score"] = scores
+
+# ================================
+# 5. 결과 저장
+# ================================
+df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+print("완료. 결과 저장 위치:", OUTPUT_CSV)
