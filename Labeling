@@ -6,6 +6,7 @@ import torch
 # 1. GitHub CSV 경로 설정
 # ================================
 
+#깃허브에 올라가 있는 csv파일 사용
 COMMUNITY_CSV = "https://github.com/P-project-Team6/TEAM6-AI_MODELING/raw/refs/heads/main/stock_community_data_top80.csv"
 
 TEXT_COLUMN = "Title"   # 제목으로 라벨링하기 위함
