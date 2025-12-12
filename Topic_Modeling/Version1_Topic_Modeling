@@ -1,0 +1,142 @@
+import pandas as pd
+import numpy as np
+
+# ================================
+# 1. 설정
+# ================================
+ROLL_WINDOW = 7               # 7일 이동평균
+MIN_POSTS = 3                 # 최소 게시물 수
+W_DAILY = 0.6                 # 일간 증가율 가중치
+W_WEEKLY = 0.4                # 7일 평균 대비 증가율 가중치
+
+
+# ================================
+# 2. 안전 로그 함수
+# ================================
+def safe_log(x):
+    return np.log1p(np.maximum(x, 0))
+
+
+# ================================
+# 3. 데이터 로드
+# ================================
+def load_data(path):
+    df = pd.read_csv(path, encoding="cp949")
+
+    df['Code'] = df['Code'].astype(str)
+
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.date
+    df = df.dropna(subset=['Date'])
+
+    df['Good'] = pd.to_numeric(df['Good'], errors='coerce').fillna(0).astype(int)
+    df['Bad'] = pd.to_numeric(df['Bad'], errors='coerce').fillna(0).astype(int)
+    df['Views'] = pd.to_numeric(df['Views'], errors='coerce').fillna(0).astype(int)
+
+    df['engagement'] = df['Good'] + df['Bad'] + safe_log(df['Views'])
+
+    return df
+
+
+# ================================
+# 4. 종목별 일간 집계
+# ================================
+def aggregate_daily(df):
+    daily = df.groupby(['Date', 'Code']).agg(
+        mentions=('Title', 'count'),
+        engagement=('engagement', 'sum')
+    ).reset_index()
+
+    return daily.sort_values(['Code', 'Date'])
+
+
+# ================================
+# 5. 증가율 계산
+# ================================
+def compute_growth(daily):
+    daily['mentions_7d_ma'] = daily.groupby('Code')['mentions'] \
+        .transform(lambda s: s.rolling(ROLL_WINDOW, min_periods=1).mean())
+
+    prev = daily.groupby('Code')['mentions'].shift(1)
+    daily['daily_growth'] = (daily['mentions'] - prev) / (prev + 1e-9)
+
+    daily['weekly_growth'] = (daily['mentions'] - daily['mentions_7d_ma']) \
+        / (daily['mentions_7d_ma'] + 1e-9)
+
+    return daily
+
+
+# ================================
+# 6. popularity 계산
+# ================================
+def compute_popularity(daily):
+    daily['log_weight'] = safe_log(daily['mentions'])
+    rate_score = W_DAILY * daily['daily_growth'] + W_WEEKLY * daily['weekly_growth']
+    engagement_factor = safe_log(daily['engagement'])
+
+    daily['popularity'] = (rate_score * daily['log_weight']) + 0.4 * engagement_factor
+    return daily
+
+
+# ================================
+# 7. 최소 조건 필터
+# ================================
+def apply_valid_filter(daily):
+    daily['valid'] = (daily['mentions'] >= MIN_POSTS)
+    return daily
+
+
+# ================================
+# 8. 오늘 기준 급등 TOP N
+# ================================
+def extract_top_stocks(daily, top_n=20):
+    last_date = daily['Date'].max()
+    recent = daily[(daily['Date'] == last_date) & (daily['valid'] == True)]
+    return recent.sort_values('popularity', ascending=False).head(top_n)
+
+
+# ================================
+# 9. 최근 7일 날짜별 TOP 5
+# ================================
+def extract_top5_last_7days(daily):
+    dates = sorted(daily['Date'].unique())
+
+    # 데이터가 7일 미만일 경우 전체 날짜 사용
+    last7 = dates[-7:] if len(dates) >= 7 else dates
+
+    rows = []
+
+    for d in last7:
+        df_day = daily[(daily['Date'] == d) & (daily['valid'] == True)]
+        df_top5 = df_day.sort_values('popularity', ascending=False).head(5)
+        rows.append(df_top5)
+
+    result = pd.concat(rows, ignore_index=True)
+    return result
+
+
+# ================================
+# 10. 전체 파이프라인 실행
+# ================================
+def run_pipeline(path):
+    df = load_data(path)
+    daily = aggregate_daily(df)
+    daily = compute_growth(daily)
+    daily = compute_popularity(daily)
+    daily = apply_valid_filter(daily)
+    top_today = extract_top_stocks(daily)
+    top7 = extract_top5_last_7days(daily)
+
+    return daily, top_today, top7
+
+
+# ================================
+# 실행부
+# ================================
+if __name__ == "__main__":
+    daily, top_today, top7 = run_pipeline("stock_community_labeled.csv")
+
+    daily.to_csv("daily_results.csv", index=False)
+    print("daily_results.csv 파일 생성됨")
+
+    top7.to_csv("top5_last7days.csv", index=False)
+    print("top5_last7days.csv 파일 생성됨")
